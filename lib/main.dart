@@ -90,8 +90,8 @@ class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin
   static const int maxFailedLoadAttempts = 3;
   int _bannerRetryCount = 0;
 
-  static const String bannerUnitId = 'ca-app-pub-4200142906990707/6687961106';
-  static const String interstitialUnitId = 'ca-app-pub-4200142906990707/1051571179';
+  static const String bannerUnitId = 'ca-app-pub-4200142906990707/7061148582';
+  static const String interstitialUnitId = 'ca-app-pub-4200142906990707/6475745098';
 
   @override
   void initState() {
