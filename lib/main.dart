@@ -9,8 +9,7 @@ void main() {
   WidgetsFlutterBinding.ensureInitialized();
   SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
 
-  // Enable test ads on this device so banners/interstitials actually load
-  // while the app is still in development (production keeps real IDs).
+  // Support test ads on common test devices to prevent ad serving freezes
   MobileAds.instance.updateRequestConfiguration(
     RequestConfiguration(
       testDeviceIds: const [
@@ -29,12 +28,14 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '2048',
+      title: 'NumBlock 2048',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        scaffoldBackgroundColor: const Color(0xFFfaf8ef),
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF8f7a66)),
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: const Color(0xFF0F172A),
+        colorScheme: const ColorScheme.dark(
+          primary: Color(0xFF38BDF8),
+          surface: Color(0xFF1E293B),
+        ),
       ),
       home: const GamePage(),
     );
@@ -42,12 +43,18 @@ class MyApp extends StatelessWidget {
 }
 
 // ============================================================
-//  Palette — classic 2048 visual identity
+//  Palette & Styles — Merge Infinity / Dark Neon Theme
 // ============================================================
-const Color kBoardBackground = Color(0xFFbbada0);
-const Color kEmptyCell = Color(0xFFcdc1b4);
-const Color kTextDark = Color(0xFF776e65);
-const Color kTextLight = Color(0xFFF9F6F2);
+const Color kBgDark = Color(0xFF0B0F19);
+const Color kBoardBg = Color(0xFF151D2E);
+const Color kEmptyCell = Color(0xFF1E293B);
+
+class GameState {
+  final List<List<int>> grid;
+  final int score;
+
+  GameState(this.grid, this.score);
+}
 
 class GamePage extends StatefulWidget {
   const GamePage({super.key});
@@ -56,8 +63,7 @@ class GamePage extends StatefulWidget {
   State<GamePage> createState() => _GamePageState();
 }
 
-class _GamePageState extends State<GamePage>
-    with SingleTickerProviderStateMixin {
+class _GamePageState extends State<GamePage> with SingleTickerProviderStateMixin {
   static const int gridSize = 4;
 
   late List<List<int>> _grid;
@@ -66,6 +72,9 @@ class _GamePageState extends State<GamePage>
   bool _gameOver = false;
   bool _won = false;
   bool _keepPlaying = false;
+
+  // Undo system - store only the previous state for single-step undo
+  GameState? _previousState;
 
   // Tile pop animation
   late final AnimationController _popController;
@@ -80,10 +89,9 @@ class _GamePageState extends State<GamePage>
   int _numAttemptsToLoadInterstitial = 0;
   static const int maxFailedLoadAttempts = 3;
   int _bannerRetryCount = 0;
-  static const String bannerUnitId =
-      'ca-app-pub-4200142906990707/6687961106';
-  static const String interstitialUnitId =
-      'ca-app-pub-4200142906990707/1051571179';
+
+  static const String bannerUnitId = 'ca-app-pub-4200142906990707/6687961106';
+  static const String interstitialUnitId = 'ca-app-pub-4200142906990707/1051571179';
 
   @override
   void initState() {
@@ -92,14 +100,13 @@ class _GamePageState extends State<GamePage>
       vsync: this,
       duration: const Duration(milliseconds: 180),
     );
-    _popAnimation =
-        CurvedAnimation(parent: _popController, curve: Curves.easeOutBack);
+    _popAnimation = CurvedAnimation(parent: _popController, curve: Curves.easeOutBack);
     _initGame();
     _initAds();
   }
 
   // ============================================================
-  //  Game state
+  //  Game state & Undo
   // ============================================================
   void _initGame() {
     setState(() {
@@ -108,10 +115,26 @@ class _GamePageState extends State<GamePage>
       _gameOver = false;
       _won = false;
       _keepPlaying = false;
+      _previousState = null;
       _addRandomTile();
       _addRandomTile();
     });
     _loadHighScore();
+  }
+
+  void _undo() {
+    if (_previousState == null) return;
+    setState(() {
+      _grid = List.generate(gridSize, (r) => List<int>.from(_previousState!.grid[r]));
+      _score = _previousState!.score;
+      if (_gameOver) {
+        _gameOver = false;
+      }
+      if (Navigator.canPop(context)) {
+        Navigator.of(context).pop();
+      }
+      _previousState = null;
+    });
   }
 
   void _addRandomTile() {
@@ -140,10 +163,12 @@ class _GamePageState extends State<GamePage>
 
   Future<void> _saveHighScore() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt('highScore', _score);
+    final int currentBest = prefs.getInt('highScore') ?? 0;
+    final int newBest = max(currentBest, _score);
+    await prefs.setInt('highScore', newBest);
     if (!mounted) return;
     setState(() {
-      _highScore = max(_highScore, _score);
+      _highScore = newBest;
     });
   }
 
@@ -229,55 +254,66 @@ class _GamePageState extends State<GamePage>
     }
   }
 
-  void _moveLeft() {
+  // Capture history, perform move, and update state if changed
+  void _move(void Function() moveAction) {
+    // Capture state BEFORE any transformations (like transpose)
+    final oldGrid = List.generate(gridSize, (r) => List<int>.from(_grid[r]));
+    final oldScore = _score;
+
+    moveAction();
+
     bool changed = false;
     for (int i = 0; i < gridSize; i++) {
-      final List<int> row = List.from(_grid[i]);
-      _compress(row);
-      _merge(row);
-      _compress(row);
-      if (!_areListsEqual(_grid[i], row)) {
+      if (!_areListsEqual(oldGrid[i], _grid[i])) {
         changed = true;
-        _grid[i] = row;
+        break;
       }
     }
-    if (changed) _afterMove();
+
+    if (changed) {
+      _previousState = GameState(oldGrid, oldScore);
+      _afterMove();
+    } else {
+      // If nothing changed, restore the old score (in case _merge modified it)
+      _score = oldScore;
+    }
   }
 
-  void _moveRight() {
-    bool changed = false;
+  void _doMoveLeft() {
     for (int i = 0; i < gridSize; i++) {
-      final List<int> original = List.from(_grid[i]);
-      final List<int> row = original.reversed.toList();
-      _compress(row);
-      _merge(row);
-      _compress(row);
-      final List<int> restored = row.reversed.toList();
-      if (!_areListsEqual(original, restored)) {
-        changed = true;
-        _grid[i] = restored;
-      }
+      _compress(_grid[i]);
+      _merge(_grid[i]);
+      _compress(_grid[i]);
     }
-    if (changed) _afterMove();
   }
 
-  void _moveUp() {
-    _transpose();
-    _moveLeft();
-    _transpose();
+  void _doMoveRight() {
+    for (int i = 0; i < gridSize; i++) {
+      _grid[i] = _grid[i].reversed.toList();
+      _compress(_grid[i]);
+      _merge(_grid[i]);
+      _compress(_grid[i]);
+      _grid[i] = _grid[i].reversed.toList();
+    }
   }
 
-  void _moveDown() {
+  void _moveLeft() => _move(_doMoveLeft);
+  void _moveRight() => _move(_doMoveRight);
+  void _moveUp() => _move(() {
     _transpose();
-    _moveRight();
+    _doMoveLeft();
     _transpose();
-  }
+  });
+  void _moveDown() => _move(() {
+    _transpose();
+    _doMoveRight();
+    _transpose();
+  });
 
   // ============================================================
-  //  Ads
+  //  Ads Handling
   // ============================================================
   void _initAds() {
-    // Give the SDK a moment to finish initializing before requesting ads.
     Future<void>.delayed(const Duration(milliseconds: 500), () {
       if (!mounted) return;
       _loadBannerAd();
@@ -292,12 +328,10 @@ class _GamePageState extends State<GamePage>
       request: const AdRequest(),
       listener: BannerAdListener(
         onAdLoaded: (_) {
-          debugPrint('>>> Banner ad loaded successfully! <<<');
           if (!mounted) return;
           setState(() => _bannerAdIsLoaded = true);
         },
         onAdFailedToLoad: (ad, error) {
-          debugPrint('>>> Banner failed to load: code=${error.code}, message=${error.message}, responseInfo=${error.responseInfo}');
           ad.dispose();
           _bannerAd = null;
           _retryBannerAd();
@@ -307,7 +341,6 @@ class _GamePageState extends State<GamePage>
   }
 
   void _retryBannerAd() {
-    // Network hiccup at startup is common — retry a few times.
     if (_bannerRetryCount >= 5) return;
     _bannerRetryCount++;
     Future<void>.delayed(
@@ -325,11 +358,9 @@ class _GamePageState extends State<GamePage>
       request: const AdRequest(),
       adLoadCallback: InterstitialAdLoadCallback(
         onAdLoaded: (ad) {
-          debugPrint('>>> Interstitial ad loaded successfully! <<<');
           _interstitialAd = ad;
         },
         onAdFailedToLoad: (error) {
-          debugPrint('>>> Interstitial failed to load: code=${error.code}, message=${error.message}, responseInfo=${error.responseInfo}');
           _interstitialAd?.dispose();
           _interstitialAd = null;
           _numAttemptsToLoadInterstitial++;
@@ -359,7 +390,7 @@ class _GamePageState extends State<GamePage>
   }
 
   // ============================================================
-  //  Dialogs
+  //  Dialogs (Modern Glass/Dark Style)
   // ============================================================
   void _showWinDialog() {
     showDialog(
@@ -370,34 +401,39 @@ class _GamePageState extends State<GamePage>
         child: Container(
           padding: const EdgeInsets.all(28),
           decoration: BoxDecoration(
-            color: kBoardBackground,
-            borderRadius: BorderRadius.circular(16),
+            color: const Color(0xFF1E293B),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black54,
+                blurRadius: 30,
+                offset: Offset(0, 10),
+              )
+            ],
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text(
-                '🏆',
-                style: TextStyle(fontSize: 56),
-              ),
+              const Text('🎉', style: TextStyle(fontSize: 48)),
               const SizedBox(height: 12),
               const Text(
-                'You win!',
+                'INFINITY REACHED!',
                 style: TextStyle(
                   fontFamily: 'Rubik',
-                  fontSize: 30,
+                  fontSize: 22,
                   fontWeight: FontWeight.bold,
-                  color: kTextDark,
+                  letterSpacing: 1.2,
+                  color: Colors.white,
                 ),
               ),
-              const SizedBox(height: 6),
+              const SizedBox(height: 8),
               Text(
                 'Score: $_score',
                 style: const TextStyle(
                   fontFamily: 'Rubik',
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.white,
+                  fontSize: 16,
+                  color: Color(0xFF94A3B8),
                 ),
               ),
               const SizedBox(height: 24),
@@ -405,7 +441,7 @@ class _GamePageState extends State<GamePage>
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   _DialogButton(
-                    label: 'Keep going',
+                    label: 'Continue',
                     onTap: () {
                       Navigator.of(ctx).pop();
                       setState(() => _keepPlaying = true);
@@ -413,7 +449,7 @@ class _GamePageState extends State<GamePage>
                   ),
                   const SizedBox(width: 12),
                   _DialogButton(
-                    label: 'New game',
+                    label: 'New Game',
                     filled: true,
                     onTap: () {
                       Navigator.of(ctx).pop();
@@ -438,43 +474,53 @@ class _GamePageState extends State<GamePage>
         child: Container(
           padding: const EdgeInsets.all(28),
           decoration: BoxDecoration(
-            color: kBoardBackground,
-            borderRadius: BorderRadius.circular(16),
+            color: const Color(0xFF1E293B),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black54,
+                blurRadius: 30,
+                offset: Offset(0, 10),
+              )
+            ],
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               const Text(
-                'Game Over!',
+                'NO MOVES LEFT',
                 style: TextStyle(
                   fontFamily: 'Rubik',
-                  fontSize: 30,
+                  fontSize: 20,
                   fontWeight: FontWeight.bold,
-                  color: kTextDark,
+                  letterSpacing: 1.5,
+                  color: Color(0xFFF43F5E),
                 ),
               ),
-              const SizedBox(height: 6),
+              const SizedBox(height: 12),
               Text(
-                'Score: $_score',
+                '$_score',
                 style: const TextStyle(
                   fontFamily: 'Rubik',
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
+                  fontSize: 44,
+                  fontWeight: FontWeight.bold,
                   color: Colors.white,
                 ),
               ),
-              const SizedBox(height: 4),
-              Text(
-                'Best: $_highScore',
-                style: const TextStyle(
+              const Text(
+                'TOTAL SCORE',
+                style: TextStyle(
                   fontFamily: 'Rubik',
-                  fontSize: 15,
-                  color: Colors.white70,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 1.2,
+                  color: Color(0xFF64748B),
                 ),
               ),
               const SizedBox(height: 24),
               _DialogButton(
-                label: 'Play again',
+                label: 'TRY AGAIN',
                 filled: true,
                 onTap: () {
                   Navigator.of(ctx).pop();
@@ -489,14 +535,13 @@ class _GamePageState extends State<GamePage>
   }
 
   // ============================================================
-  //  Build
+  //  Build Functions & Modern Layout
   // ============================================================
   void _handleSwipe(DragEndDetails details) {
     final velocity = details.velocity.pixelsPerSecond;
     final double dx = velocity.dx;
     final double dy = velocity.dy;
 
-    // Require a minimum flick velocity to count as a swipe
     const double threshold = 200.0;
     if (dx.abs() < threshold && dy.abs() < threshold) return;
 
@@ -520,21 +565,29 @@ class _GamePageState extends State<GamePage>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: kBgDark,
       body: SafeArea(
         child: GestureDetector(
-          // Use pan callbacks with velocity-based direction; the board
-          // container is NOT scrollable so vertical swipes reach us.
           onPanEnd: _handleSwipe,
-          child: Column(
-            children: [
-              _buildHeader(),
-              Expanded(child: _buildBoard()),
-            ],
+          child: Container(
+            decoration: const BoxDecoration(
+              gradient: RadialGradient(
+                center: Alignment(0, -0.4),
+                radius: 1.2,
+                colors: [Color(0xFF1E293B), Color(0xFF0B0F19)],
+              ),
+            ),
+            child: Column(
+              children: [
+                _buildHeader(),
+                Expanded(child: _buildBoard()),
+              ],
+            ),
           ),
         ),
       ),
       bottomNavigationBar: Container(
-        color: kBoardBackground,
+        color: const Color(0xFF0B0F19),
         height: 60,
         alignment: Alignment.center,
         child: _bannerAdIsLoaded && _bannerAd != null
@@ -544,12 +597,12 @@ class _GamePageState extends State<GamePage>
                 child: AdWidget(ad: _bannerAd!),
               )
             : const Text(
-                'AdMob',
+                'AdMob Banner',
                 style: TextStyle(
                   fontFamily: 'Rubik',
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFFeee4da),
+                  fontSize: 12,
+                  letterSpacing: 1.0,
+                  color: Colors.white24,
                 ),
               ),
       ),
@@ -558,20 +611,35 @@ class _GamePageState extends State<GamePage>
 
   Widget _buildHeader() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
       child: Column(
         children: [
           Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              const Text(
-                '2048',
-                style: TextStyle(
-                  fontFamily: 'Rubik',
-                  fontSize: 44,
-                  fontWeight: FontWeight.bold,
-                  color: kTextDark,
-                ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: const [
+                  Text(
+                    'NUMBLOCK',
+                    style: TextStyle(
+                      fontFamily: 'Rubik',
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 2.5,
+                      color: Color(0xFF38BDF8),
+                    ),
+                  ),
+                  Text(
+                    '2048',
+                    style: TextStyle(
+                      fontFamily: 'Rubik',
+                      fontSize: 36,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: -1.0,
+                      color: Colors.white,
+                    ),
+                  ),
+                ],
               ),
               const Spacer(),
               _ScoreCard(title: 'SCORE', value: _score),
@@ -579,43 +647,32 @@ class _GamePageState extends State<GamePage>
               _ScoreCard(title: 'BEST', value: _highScore),
             ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 16),
           Row(
             children: [
-              const Expanded(
-                child: Text(
-                  'Join the numbers and get to the 2048 tile!',
-                  style: TextStyle(
-                    fontFamily: 'Rubik',
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: kTextDark,
-                  ),
-                ),
+              // Action Buttons: Undo & Reset
+              _IconButton(
+                icon: Icons.undo_rounded,
+                enabled: _previousState != null,
+                onTap: _undo,
               ),
-              Material(
-                color: const Color(0xFF8f7a66),
-                borderRadius: BorderRadius.circular(8),
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(8),
-                  onTap: _initGame,
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-                    child: Text(
-                      'New game',
-                      style: TextStyle(
-                        fontFamily: 'Rubik',
-                        fontSize: 15,
-                        fontWeight: FontWeight.bold,
-                        color: kTextLight,
-                      ),
-                    ),
-                  ),
+              const SizedBox(width: 8),
+              _IconButton(
+                icon: Icons.refresh_rounded,
+                enabled: true,
+                onTap: _initGame,
+              ),
+              const Spacer(),
+              const Text(
+                'Join tiles to reach 2048',
+                style: TextStyle(
+                  fontFamily: 'Rubik',
+                  fontSize: 13,
+                  color: Color(0xFF64748B),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 12),
         ],
       ),
     );
@@ -626,32 +683,40 @@ class _GamePageState extends State<GamePage>
       child: AspectRatio(
         aspectRatio: 1,
         child: Container(
-          padding: const EdgeInsets.all(10),
+          margin: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
-            color: kBoardBackground,
-            borderRadius: BorderRadius.circular(12),
+            color: kBoardBg,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.04), width: 1.5),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.4),
+                blurRadius: 20,
+                offset: const Offset(0, 10),
+              )
+            ],
           ),
           child: LayoutBuilder(
             builder: (context, constraints) {
               final double cellSize =
-                  (constraints.maxWidth - 10 * (gridSize - 1)) / gridSize;
-              // First frame can arrive with zero width — skip layout until
-              // the board has real constraints.
+                  (constraints.maxWidth - 12 * (gridSize - 1)) / gridSize;
               if (cellSize <= 0) return const SizedBox.expand();
+
               return Stack(
                 children: [
                   // Empty cells background
                   for (int row = 0; row < gridSize; row++)
                     for (int col = 0; col < gridSize; col++)
                       Positioned(
-                        left: col * (cellSize + 10),
-                        top: row * (cellSize + 10),
+                        left: col * (cellSize + 12),
+                        top: row * (cellSize + 12),
                         child: Container(
                           width: cellSize,
                           height: cellSize,
                           decoration: BoxDecoration(
                             color: kEmptyCell,
-                            borderRadius: BorderRadius.circular(8),
+                            borderRadius: BorderRadius.circular(14),
                           ),
                         ),
                       ),
@@ -660,46 +725,14 @@ class _GamePageState extends State<GamePage>
                     for (int col = 0; col < gridSize; col++)
                       if (_grid[row][col] != 0)
                         Positioned(
-                          left: col * (cellSize + 10),
-                          top: row * (cellSize + 10),
+                          left: col * (cellSize + 12),
+                          top: row * (cellSize + 12),
                           child: _Tile(
                             value: _grid[row][col],
                             size: cellSize,
                             pop: _popAnimation,
                           ),
                         ),
-                  // Game over veil
-                  if (_gameOver)
-                    Positioned.fill(
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFfaf8ef).withValues(alpha: .7),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Text(
-                                'Game over!',
-                                style: TextStyle(
-                                  fontFamily: 'Rubik',
-                                  fontSize: 36,
-                                  fontWeight: FontWeight.bold,
-                                  color: kTextDark,
-                                ),
-                              ),
-                              const SizedBox(height: 16),
-                              _DialogButton(
-                                label: 'Try again',
-                                filled: true,
-                                onTap: _initGame,
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
                 ],
               );
             },
@@ -719,7 +752,7 @@ class _GamePageState extends State<GamePage>
 }
 
 // ============================================================
-//  Widgets
+//  Neon Tiles & Component Styling
 // ============================================================
 class _ScoreCard extends StatelessWidget {
   final String title;
@@ -730,10 +763,12 @@ class _ScoreCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      constraints: const BoxConstraints(minWidth: 70),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
       decoration: BoxDecoration(
-        color: kBoardBackground,
-        borderRadius: BorderRadius.circular(8),
+        color: const Color(0xFF1E293B),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -742,21 +777,61 @@ class _ScoreCard extends StatelessWidget {
             title,
             style: const TextStyle(
               fontFamily: 'Rubik',
-              fontSize: 11,
+              fontSize: 10,
               fontWeight: FontWeight.bold,
-              color: Color(0xFFeee4da),
+              letterSpacing: 1.0,
+              color: Color(0xFF64748B),
             ),
           ),
+          const SizedBox(height: 2),
           Text(
             '$value',
             style: const TextStyle(
               fontFamily: 'Rubik',
-              fontSize: 20,
+              fontSize: 18,
               fontWeight: FontWeight.bold,
               color: Colors.white,
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _IconButton extends StatelessWidget {
+  final IconData icon;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  const _IconButton({
+    required this.icon,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: enabled ? const Color(0xFF1E293B) : const Color(0xFF0F172A),
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: enabled ? onTap : null,
+        child: Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: enabled ? Colors.white.withValues(alpha: 0.08) : Colors.transparent,
+            ),
+          ),
+          child: Icon(
+            icon,
+            size: 20,
+            color: enabled ? Colors.white : Colors.white24,
+          ),
+        ),
       ),
     );
   }
@@ -776,25 +851,25 @@ class _DialogButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: filled ? const Color(0xFF8f7a66) : Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
-        side: filled
-            ? BorderSide.none
-            : const BorderSide(color: Color(0xFF8f7a66), width: 2),
-      ),
+      color: filled ? const Color(0xFF38BDF8) : Colors.transparent,
+      borderRadius: BorderRadius.circular(12),
       child: InkWell(
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(12),
         onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: filled ? null : Border.all(color: Colors.white24),
+          ),
           child: Text(
             label,
             style: TextStyle(
               fontFamily: 'Rubik',
-              fontSize: 15,
+              fontSize: 14,
               fontWeight: FontWeight.bold,
-              color: filled ? kTextLight : const Color(0xFF8f7a66),
+              letterSpacing: 0.5,
+              color: filled ? const Color(0xFF0F172A) : Colors.white,
             ),
           ),
         ),
@@ -817,12 +892,25 @@ class _Tile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final bool isNew = value == 2 || value == 4;
+    final List<Color> colors = _tileColors(value);
+
     final Widget tile = Container(
       width: size,
       height: size,
       decoration: BoxDecoration(
-        color: _tileColor(value),
-        borderRadius: BorderRadius.circular(8),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: colors,
+        ),
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: [
+          BoxShadow(
+            color: colors.first.withValues(alpha: 0.35),
+            blurRadius: value >= 64 ? 14 : 6,
+            offset: const Offset(0, 4),
+          )
+        ],
       ),
       alignment: Alignment.center,
       child: Text(
@@ -831,7 +919,7 @@ class _Tile extends StatelessWidget {
           fontFamily: 'Rubik',
           fontSize: _fontSize(value),
           fontWeight: FontWeight.bold,
-          color: value <= 4 ? const Color(0xFF776e65) : kTextLight,
+          color: Colors.white,
         ),
       ),
     );
@@ -839,45 +927,41 @@ class _Tile extends StatelessWidget {
     if (isNew) {
       return ScaleTransition(scale: pop, child: tile);
     }
-    return AnimatedScale(
-      scale: 1.0,
-      duration: const Duration(milliseconds: 120),
-      child: tile,
-    );
+    return tile;
   }
 
-  Color _tileColor(int value) {
+  List<Color> _tileColors(int value) {
     switch (value) {
       case 2:
-        return const Color(0xFFeee4da);
+        return const [Color(0xFF334155), Color(0xFF1E293B)]; // Soft Slate
       case 4:
-        return const Color(0xFFede0c8);
+        return const [Color(0xFF0284C7), Color(0xFF0369A1)]; // Electric Blue
       case 8:
-        return const Color(0xFFf2b179);
+        return const [Color(0xFF0D9488), Color(0xFF0F766E)]; // Emerald Teal
       case 16:
-        return const Color(0xFFf59563);
+        return const [Color(0xFF16A34A), Color(0xFF15803D)]; // Neon Green
       case 32:
-        return const Color(0xFFf67c5f);
+        return const [Color(0xFFCA8A04), Color(0xFFA16207)]; // Golden Yellow
       case 64:
-        return const Color(0xFFf65e3b);
+        return const [Color(0xFFEA580C), Color(0xFFC2410C)]; // Bright Orange
       case 128:
-        return const Color(0xFFedcf72);
+        return const [Color(0xFFE11D48), Color(0xFFBE123C)]; // Neon Crimson
       case 256:
-        return const Color(0xFFedcc61);
+        return const [Color(0xFF9333EA), Color(0xFF7E22CE)]; // Electric Violet
       case 512:
-        return const Color(0xFFedc850);
+        return const [Color(0xFF4F46E5), Color(0xFF4338CA)]; // Deep Indigo
       case 1024:
-        return const Color(0xFFedc53f);
+        return const [Color(0xFFEC4899), Color(0xFFBE185D)]; // Pink Blast
       case 2048:
-        return const Color(0xFFedc22e);
+        return const [Color(0xFFF59E0B), Color(0xFFD97706)]; // Supernova Sun
       default:
-        return const Color(0xFF3c3a32); // >2048 super tiles
+        return const [Color(0xFF8B5CF6), Color(0xFF3B82F6)]; // Cosmic Infinity
     }
   }
 
   double _fontSize(int value) {
-    if (value < 100) return size * 0.42;
-    if (value < 1000) return size * 0.34;
-    return size * 0.27;
+    if (value < 100) return size * 0.40;
+    if (value < 1000) return size * 0.32;
+    return size * 0.26;
   }
 }

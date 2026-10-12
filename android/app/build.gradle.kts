@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.game2048.commercial"
+    namespace = "com.aggab.numblock"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -15,7 +15,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.game2048.commercial"
+        applicationId = "com.aggab.numblock"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion

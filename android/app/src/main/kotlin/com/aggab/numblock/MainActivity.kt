@@ -1,4 +1,4 @@
-package com.game2048.commercial
+package com.aggab.numblock
 
 import io.flutter.embedding.android.FlutterActivity
 
