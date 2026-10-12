@@ -43,8 +43,8 @@ A polished, commercial-grade implementation of the classic 2048 puzzle game buil
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/game_2048.git
-   cd game_2048
+   git clone https://github.com/billelaggab/numblock.git
+   cd numblock
    ```
 
 2. **Install dependencies:**
